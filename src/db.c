@@ -254,6 +254,14 @@ int selectDb(redisClient *c, int id) {
     return REDIS_OK;
 }
 
+int selectDb2(redisClient *c, int id, int *last) {
+    if (id < 0 || id >= server.dbnum)
+        return REDIS_ERR;
+    *last = c->db->id;
+    c->db = &server.db[id];
+    return REDIS_OK;
+}
+
 /*-----------------------------------------------------------------------------
  * Hooks for key space changes.
  *
@@ -342,6 +350,28 @@ void selectCommand(redisClient *c) {
         addReplyError(c,"invalid DB index");
     } else {
         addReply(c,shared.ok);
+    }
+}
+
+/*
+ return the db index also.
+*/
+void select2Command(redisClient *c) {
+    long id;
+
+    if (getLongFromObjectOrReply(c, c->argv[1], &id,
+        "invalid DB index") != REDIS_OK)
+        return;
+
+    if (server.cluster_enabled && id != 0) {
+        addReplyError(c,"SELECT is not allowed in cluster mode");
+        return;
+    }
+    int last = -1;
+    if (selectDb2(c, id, &last) == REDIS_ERR) {
+        addReplyError(c,"invalid DB index");
+    } else {
+        addReplyLongLong(c, last);
     }
 }
 

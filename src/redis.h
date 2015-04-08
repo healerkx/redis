@@ -1424,6 +1424,7 @@ void incrbyCommand(redisClient *c);
 void decrbyCommand(redisClient *c);
 void incrbyfloatCommand(redisClient *c);
 void selectCommand(redisClient *c);
+void select2Command(redisClient *c);
 void randomkeyCommand(redisClient *c);
 void keysCommand(redisClient *c);
 void scanCommand(redisClient *c);
