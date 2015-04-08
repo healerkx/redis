@@ -371,6 +371,9 @@ void hashTypeCurrentFromZiplist(hashTypeIterator *hi, int what,
     if (what & REDIS_HASH_KEY) {
         ret = ziplistGet(hi->fptr, vstr, vlen, vll);
         redisAssert(ret);
+    } else if (what & REDIS_HASH_KEY_PATTERN) {
+        ret = ziplistGet(hi->fptr, vstr, vlen, vll);
+        redisAssert(ret);
     } else {
         ret = ziplistGet(hi->vptr, vstr, vlen, vll);
         redisAssert(ret);
@@ -382,7 +385,7 @@ void hashTypeCurrentFromZiplist(hashTypeIterator *hi, int what,
 void hashTypeCurrentFromHashTable(hashTypeIterator *hi, int what, robj **dst) {
     redisAssert(hi->encoding == REDIS_ENCODING_HT);
 
-    if (what & REDIS_HASH_KEY) {
+    if (what & REDIS_HASH_KEY || what & REDIS_HASH_KEY_PATTERN) {
         *dst = dictGetKey(hi->de);
     } else {
         *dst = dictGetVal(hi->de);
@@ -716,28 +719,53 @@ void hstrlenCommand(redisClient *c) {
     addReplyLongLong(c,hashTypeGetValueLength(o,c->argv[2]));
 }
 
-static void addHashIteratorCursorToReply(redisClient *c, hashTypeIterator *hi, int what) {
+static int patternDismatched(sds pattern, sds key)
+{
+    int plen = sdslen(pattern);
+    int ret = !stringmatchlen(pattern, plen, key, sdslen(key), 0);
+    sdsfree(key);
+    return ret;
+}
+
+/*
+ * The return value indicates match result
+ */
+static int addHashIteratorCursorToReply(redisClient *c, hashTypeIterator *hi, int what) {
+
     if (hi->encoding == REDIS_ENCODING_ZIPLIST) {
         unsigned char *vstr = NULL;
         unsigned int vlen = UINT_MAX;
         long long vll = LLONG_MAX;
-
+        
         hashTypeCurrentFromZiplist(hi, what, &vstr, &vlen, &vll);
+
         if (vstr) {
+            sds key = sdsnewlen(vstr, vlen);
+            if ( what & REDIS_HASH_KEY_PATTERN && patternDismatched(c->argv[2]->ptr, key) )
+                return 0;
+            
             addReplyBulkCBuffer(c, vstr, vlen);
         } else {
+            sds key = sdsfromlonglong(vll);
+            if ( what & REDIS_HASH_KEY_PATTERN && patternDismatched(c->argv[2]->ptr, key) )
+                return 0;
             addReplyBulkLongLong(c, vll);
         }
 
     } else if (hi->encoding == REDIS_ENCODING_HT) {
         robj *value;
-
+        // TODO: This branch need test
         hashTypeCurrentFromHashTable(hi, what, &value);
+        if (what & REDIS_HASH_KEY_PATTERN && patternDismatched(c->argv[2]->ptr, value))
+        {
+            return 0;    
+        }
         addReplyBulk(c, value);
 
     } else {
         redisPanic("Unknown hash encoding");
     }
+    return 1;
 }
 
 void genericHgetallCommand(redisClient *c, int flags) {
@@ -761,6 +789,7 @@ void genericHgetallCommand(redisClient *c, int flags) {
             addHashIteratorCursorToReply(c, hi, REDIS_HASH_KEY);
             count++;
         }
+
         if (flags & REDIS_HASH_VALUE) {
             addHashIteratorCursorToReply(c, hi, REDIS_HASH_VALUE);
             count++;
@@ -771,8 +800,58 @@ void genericHgetallCommand(redisClient *c, int flags) {
     redisAssert(count == length);
 }
 
+/* The function deals uncentain count replies before addReply___ */
+void genericHgetallCommand2(redisClient *c, int flags) {
+    robj *o;
+    hashTypeIterator *hi;
+    int length, count = 0;
+    int hit = 0;
+
+    if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.emptymultibulk)) == NULL
+        || checkType(c,o,REDIS_HASH)) return;
+
+    redisAssert(flags & REDIS_HASH_KEY_PATTERN);
+    void *replylen = addDeferredMultiBulkLength(c);
+
+    hi = hashTypeInitIterator(o);
+    while (hashTypeNext(hi) != REDIS_ERR) {
+        hit  = 0;
+        if (flags & REDIS_HASH_KEY_PATTERN) {
+            if (addHashIteratorCursorToReply(c, hi, REDIS_HASH_KEY_PATTERN)) {
+                count++;
+                hit = 1;
+            }
+        }
+
+        if (hit && (flags & REDIS_HASH_VALUE)) {
+            addHashIteratorCursorToReply(c, hi, REDIS_HASH_VALUE);
+            count++;
+        }
+    }
+
+    hashTypeReleaseIterator(hi);
+    setDeferredMultiBulkLength(c, replylen, count);
+}
+
 void hkeysCommand(redisClient *c) {
     genericHgetallCommand(c,REDIS_HASH_KEY);
+}
+
+void hkeys2Command(redisClient *c) {
+    if (c->argc == 2) {
+        genericHgetallCommand(c, REDIS_HASH_KEY);
+    } else if (c->argc > 2) {
+
+        sds pattern = c->argv[2]->ptr;
+        if (pattern[0] == '*' && pattern[1] == '\0')
+        {
+            genericHgetallCommand(c, REDIS_HASH_KEY);
+        }
+        else
+        {
+            genericHgetallCommand2(c, REDIS_HASH_KEY_PATTERN);
+        }
+    }
 }
 
 void hvalsCommand(redisClient *c) {
@@ -781,6 +860,19 @@ void hvalsCommand(redisClient *c) {
 
 void hgetallCommand(redisClient *c) {
     genericHgetallCommand(c,REDIS_HASH_KEY|REDIS_HASH_VALUE);
+}
+
+void hgetall2Command(redisClient *c) {
+    if (c->argc == 2) {
+        genericHgetallCommand(c, REDIS_HASH_KEY | REDIS_HASH_VALUE);
+    } else if (c->argc > 2) {
+        sds pattern = c->argv[2]->ptr;
+        if (pattern[0] == '*' && pattern[1] == '\0') {
+            genericHgetallCommand(c, REDIS_HASH_KEY | REDIS_HASH_VALUE);
+        } else {
+            genericHgetallCommand2(c, REDIS_HASH_KEY_PATTERN | REDIS_HASH_VALUE);
+        }
+    }
 }
 
 void hexistsCommand(redisClient *c) {
