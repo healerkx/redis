@@ -1146,6 +1146,72 @@ int redis_math_randomseed (lua_State *L) {
   return 0;
 }
 
+static int stringEndsWith(char *src, char *suffix)
+{
+    int m = strlen(src);
+    int n = strlen(suffix);
+    return !strcmp(src + (m - n), suffix);
+}
+
+static char* readfile(char *filename)
+{
+    FILE *fp = fopen(filename, "r");
+    if (!fp)
+    {
+        return NULL;
+    }
+    fseek(fp, 0L, SEEK_END);
+    size_t len = ftell(fp);
+    if (len == 0)
+        return NULL;
+
+    char *buffer = (char*)malloc(len);
+    rewind(fp);
+    fread(buffer, len + 1, 1, fp);
+    fclose(fp);
+    return buffer;
+}
+
+/* I did NOT check the length of path and file */
+static int loadLuaFile(char *path, char *file)
+{
+    char filename[1024] = {0};
+    strcpy(filename, path);
+    if (!stringEndsWith(path, "/"))
+    {
+        filename[strlen(path)] = '/';
+    }
+    strcpy(filename + strlen(path) + 1, file);
+    
+    char *content = readfile(filename);
+    if (content)
+    {
+        printf("%s\n", content);
+        free(content);
+    }
+
+    return 0;
+}
+
+/**/
+#include <dirent.h>
+static int loadAllLuaScripts(redisClient *c, char *path)
+{
+    int r = 0;
+    DIR *dir = NULL;
+    struct dirent *ent = NULL;
+    dir = opendir(path);
+
+    while((ent = readdir(dir)) != NULL)
+    {
+        char* filename = ent->d_name;
+        if (filename[0] == '.' || !stringEndsWith(filename, ".lua"))
+            continue;
+        printf("Loading %s\n", filename);
+        loadLuaFile(path, filename);
+    }
+    return r;
+} 
 /* ---------------------------------------------------------------------------
  * SCRIPT command for script environment introspection and control
  * ------------------------------------------------------------------------- */
@@ -1192,6 +1258,17 @@ void scriptCommand(redisClient *c) {
         } else {
             server.lua_kill = 1;
             addReply(c,shared.ok);
+        }
+    } else if (c->argc == 2 && !strcasecmp(c->argv[1]->ptr,"loadall")) {
+        if (server.lua_script_path) {
+            printf("Load Lua scripts from %s\n", server.lua_script_path);
+            int r = loadAllLuaScripts(c, server.lua_script_path);
+            if (r > 0)
+                addReply(c,shared.ok);
+            else if (r < 0)
+                addReply(c,shared.err);
+            else
+                addReply(c,shared.czero);
         }
     } else {
         addReplyError(c, "Unknown SCRIPT subcommand or wrong # of args.");
