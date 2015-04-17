@@ -799,6 +799,16 @@ void sha1hex(char *digest, char *script, size_t len) {
     digest[40] = '\0';
 }
 
+static sds getFunctionName(char *origin, char *funcname)
+{
+    sds sha;
+    funcname[0] = 'f';
+    funcname[1] = '_';
+    sha1hex(funcname+2, origin, strlen(origin));
+    sha = sdsnewlen(funcname+2,40);
+    return sha;
+} 
+
 void luaReplyToRedisReply(redisClient *c, lua_State *lua) {
     int t = lua_type(lua,-1);
 
@@ -901,6 +911,7 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
         sdsfree(funcdef);
         return REDIS_ERR;
     }
+  
     sdsfree(funcdef);
     if (lua_pcall(lua,0,0,0)) {
         addReplyErrorFormat(c,"Error running script (new function): %s\n",
@@ -917,8 +928,24 @@ int luaCreateFunction(redisClient *c, lua_State *lua, char *funcname, robj *body
                              sdsnewlen(funcname+2,40),body);
         redisAssertWithInfo(c,NULL,retval == DICT_OK);
         incrRefCount(body);
+        
     }
     return REDIS_OK;
+}
+
+static int luaCreateFunction2(redisClient *c, lua_State *lua, char *filename, char *bodyStr) {
+
+    /* This function is for load and reload lua scripts */
+    char funcname[43] = { 0 };
+    sds sha = getFunctionName(filename, funcname);
+    if (dictFind(server.lua_scripts, sha)) { 
+        dictDelete(server.lua_scripts, sha);
+    }
+    sdsfree(sha);
+    
+    robj *body = createRawStringObject( bodyStr, strlen(bodyStr) );
+    printf("Load file [%s] as function %s()\n----------------------%s\n----------------------\n", filename, funcname, (char*)body->ptr);
+    return luaCreateFunction(c, lua, funcname, body);
 }
 
 void evalGenericCommand(redisClient *c, int evalsha) {
@@ -1107,6 +1134,16 @@ void evalShaCommand(redisClient *c) {
     evalGenericCommand(c,1);
 }
 
+void evalFileCommand(redisClient *c) {
+    sds sha;
+    char funcname[43] = {0};
+    sha = getFunctionName(c->argv[1]->ptr, funcname);
+    freeStringObject(c->argv[1]);
+    c->argv[1] = createRawStringObject(sha, sdslen(sha));
+    sdsfree(sha);
+    evalGenericCommand(c,1);
+}
+
 /* We replace math.random() with our implementation that is not affected
  * by specific libc random() implementations and will output the same sequence
  * (for the same seed) in every arch. */
@@ -1153,7 +1190,7 @@ static int stringEndsWith(char *src, char *suffix)
     return !strcmp(src + (m - n), suffix);
 }
 
-static char* readfile(char *filename)
+static char *readfile(char *filename)
 {
     FILE *fp = fopen(filename, "r");
     if (!fp)
@@ -1165,15 +1202,17 @@ static char* readfile(char *filename)
     if (len == 0)
         return NULL;
 
-    char *buffer = (char*)malloc(len);
+    char *buffer = (char*)zmalloc(len + 1);
+    memset(buffer, 0, len + 1);
     rewind(fp);
-    fread(buffer, len + 1, 1, fp);
+    fread(buffer, len, 1, fp);
+
     fclose(fp);
     return buffer;
 }
 
 /* I did NOT check the length of path and file */
-static int loadLuaFile(char *path, char *file)
+static int loadLuaFile(redisClient *c, char *path, char *file)
 {
     char filename[1024] = {0};
     strcpy(filename, path);
@@ -1186,8 +1225,8 @@ static int loadLuaFile(char *path, char *file)
     char *content = readfile(filename);
     if (content)
     {
-        printf("%s\n", content);
-        free(content);
+        luaCreateFunction2(c, server.lua, file, content);
+        zfree(content);
     }
 
     return 0;
@@ -1207,8 +1246,7 @@ static int loadAllLuaScripts(redisClient *c, char *path)
         char* filename = ent->d_name;
         if (filename[0] == '.' || !stringEndsWith(filename, ".lua"))
             continue;
-        printf("Loading %s\n", filename);
-        loadLuaFile(path, filename);
+        loadLuaFile(c, path, filename);
     }
     return r;
 } 
@@ -1259,7 +1297,7 @@ void scriptCommand(redisClient *c) {
             server.lua_kill = 1;
             addReply(c,shared.ok);
         }
-    } else if (c->argc == 2 && !strcasecmp(c->argv[1]->ptr,"loadall")) {
+    } else if (c->argc >= 2 && !strcasecmp(c->argv[1]->ptr, "reload")) {
         if (server.lua_script_path) {
             printf("Load Lua scripts from %s\n", server.lua_script_path);
             int r = loadAllLuaScripts(c, server.lua_script_path);

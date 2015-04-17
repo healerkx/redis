@@ -291,6 +291,7 @@ struct redisCommand redisCommandTable[] = {
     {"select2", select2Command, 2, "rlF", 0, NULL, 0, 0, 0, 0, 0 },
     {"hkeys2", hkeys2Command, -2, "rS", 0, NULL, 1, 1, 1, 0, 0 },
     {"hget2", hgetall2Command, 3, "r", 0, NULL, 1, 1, 1, 0, 0 },
+    {"evalfile",evalFileCommand,-2,"s",0,evalGetKeys,0,0,0,0,0},
 };
 
 struct evictionPoolEntry *evictionPoolAlloc(void);

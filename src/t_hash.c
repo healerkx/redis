@@ -804,7 +804,7 @@ void genericHgetallCommand(redisClient *c, int flags) {
 void genericHgetallCommand2(redisClient *c, int flags) {
     robj *o;
     hashTypeIterator *hi;
-    int length, count = 0;
+    int count = 0;
     int hit = 0;
 
     if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.emptymultibulk)) == NULL
